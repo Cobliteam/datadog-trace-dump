@@ -1,0 +1,133 @@
+#!/usr/bin/perl
+use strict;
+use open ':std', ':encoding(UTF-8)';
+use warnings FATAL => 'all';
+
+use HTTP::Server::Simple::CGI;
+use Graph::Easy;
+
+select(STDERR);
+$| = 1;
+
+$SIG{INT}  = sub { exit;};         # kill -2  or Ctrl-C
+
+{ package WebServer; use base 'HTTP::Server::Simple::CGI';
+
+use JSON::Parse 'parse_json';
+
+my $nl = "\x0d\x0a";
+
+my %graphs;
+my %id2node;
+my %parent_of;
+
+
+my $root = '.';
+if (@ARGV) {
+    $root = shift;
+}
+chdir($root);
+
+sub print_header { # {{{
+
+    print "HTTP/1.0 200 OK$nl";
+    print "Content-Type: text/plain$nl$nl";
+
+} # }}}
+
+sub get_graph {
+    my $id = shift;
+
+    if(!$graphs{$id}){
+        $graphs{$id} = Graph::Easy->new();
+        $graphs{$id}->set_attributes('graph',
+            {
+                textwrap => 'auto',
+                flow => 'south'
+            }
+        );
+    }
+
+    return $graphs{$id};
+
+}
+
+
+sub handle_request { # {{{
+
+    my $self = shift;
+    my $cgi  = shift;
+
+
+    my %changed_traces;
+
+    print_header();
+
+    my $body =  $cgi->param('PUTDATA');
+    my $parsed_body = parse_json($body);
+
+    foreach my $trace (@$parsed_body){
+        foreach my $span (@{$trace}) {
+            my $graph = get_graph($span->{'trace_id'});
+
+            my $name = $span->{'name'}.
+                '\n'.$span->{'resource'}.
+		'\n'.($span->{'duration'}/1000000)
+		#'\n'.$span->{'trace_id'}.
+		#'\n'.($span->{'parent_id'} ? $span->{'parent_id'} : '-').
+		#'\n'.$span->{'span_id'}
+
+            ;
+
+
+            my $node = new Graph::Easy::Node($name);
+
+            if($span->{'parent_id'}){
+                $parent_of{$span->{'trace_id'}}{$span->{'span_id'}} = $span->{'parent_id'}
+            } else {
+                $node->set_attribute('borderstyle', 'wide');
+            }
+
+            $node->set_attribute('borderstyle', 'broad') if ($span->{'error'});
+            $id2node{$span->{'span_id'}} = $node;
+
+            $graph->add_node($node);
+            $changed_traces{$span->{'trace_id'}} = 1;
+
+        }
+    }
+
+    #reset hash
+    keys %parent_of;
+
+    while(my ($trace_id, $spans) = each(%parent_of)) {
+        my @processed;
+	keys %$spans;
+        while(my ($span_id, $parent_id) = each(%$spans)) {
+	    if($id2node{$parent_id}){
+            	get_graph($trace_id)->add_edge($id2node{$parent_id}, $id2node{$span_id});
+            	$changed_traces{$trace_id} = 1;
+            	push @processed, $span_id;
+	    }
+        }
+        foreach my $span_id (@processed) {delete $spans->{$span_id}};
+    }
+
+    while(my ($trace_id, $changed) = each(%changed_traces)) {
+        if($changed) {
+            print STDERR "Trace alterado: " . $trace_id . "\n";
+            print STDERR get_graph($trace_id)->as_boxart;
+            print STDERR ("#" x 20)."\n";
+        }
+    }
+
+    print "OK";
+
+} # }}}
+
+
+}
+
+# Use Port 8080 (http://localhost:8080)
+my $pid = WebServer -> new(8126) -> run();
+print "pid of webserver=$pid\n";
